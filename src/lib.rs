@@ -109,6 +109,7 @@ use arrayref::{array_mut_ref, array_ref};
 use arrayvec::{ArrayString, ArrayVec};
 use core::cmp;
 use core::fmt;
+use core::mem::{self, MaybeUninit};
 use join::{Join, SerialJoin};
 use platform::{Platform, MAX_SIMD_DEGREE, MAX_SIMD_DEGREE_OR_2};
 
@@ -1247,6 +1248,47 @@ impl std::io::Write for Hasher {
     }
 }
 
+pub trait IntoMaybeUninit<T: ?Sized> {
+    fn into_maybeuninit(&self) -> &T;
+    fn into_maybeuninit_mut(&mut self) -> &mut T;
+}
+
+impl<T> IntoMaybeUninit<[MaybeUninit<T>]> for [T] {
+    fn into_maybeuninit(&self) -> &[MaybeUninit<T>] {
+        unsafe { mem::transmute::<_, &[MaybeUninit<T>]>(self) }
+    }
+    fn into_maybeuninit_mut(&mut self) -> &mut [MaybeUninit<T>] {
+        unsafe { mem::transmute::<_, &mut [MaybeUninit<T>]>(self) }
+    }
+}
+
+impl<T, const L:usize> IntoMaybeUninit<[MaybeUninit<T>]> for [T; L] {
+    fn into_maybeuninit(&self) -> &[MaybeUninit<T>] {
+        unsafe { mem::transmute::<_, &[MaybeUninit<T>; L]>(self) }
+    }
+    fn into_maybeuninit_mut(&mut self) -> &mut [MaybeUninit<T>] {
+        unsafe { mem::transmute::<_, &mut [MaybeUninit<T>; L]>(self) }
+    }
+}
+
+impl<T> IntoMaybeUninit<[MaybeUninit<T>]> for [MaybeUninit<T>] {
+    fn into_maybeuninit(&self) -> &[MaybeUninit<T>] {
+        self
+    }
+    fn into_maybeuninit_mut(&mut self) -> &mut [MaybeUninit<T>] {
+        self
+    }
+}
+
+impl<T> IntoMaybeUninit<MaybeUninit<T>> for T {
+    fn into_maybeuninit(&self) -> &MaybeUninit<T> {
+        unsafe { mem::transmute::<_, &MaybeUninit<T>>(self) }
+    }
+    fn into_maybeuninit_mut(&mut self) -> &mut MaybeUninit<T> {
+        unsafe { mem::transmute::<_, &mut MaybeUninit<T>>(self) }
+    }
+}
+
 /// An incremental reader for extended output, returned by
 /// [`Hasher::finalize_xof`](struct.Hasher.html#method.finalize_xof).
 #[derive(Clone)]
@@ -1278,12 +1320,14 @@ impl OutputReader {
     /// reading further, the behavior is unspecified.
     ///
     /// [`Read::read`]: #method.read
-    pub fn fill(&mut self, mut buf: &mut [u8]) {
+    pub fn fill<'a, T>(&mut self, buf: &mut T)
+    where T: IntoMaybeUninit<[MaybeUninit<u8>]> + ?Sized {
+        let mut buf = buf.into_maybeuninit_mut();
         while !buf.is_empty() {
             let block: [u8; BLOCK_LEN] = self.inner.root_output_block();
             let output_bytes = &block[self.position_within_block as usize..];
             let take = cmp::min(buf.len(), output_bytes.len());
-            buf[..take].copy_from_slice(&output_bytes[..take]);
+            buf[..take].copy_from_slice(unsafe { mem::transmute::<_, &[MaybeUninit<u8>]>(&output_bytes[..take])});
             buf = &mut buf[take..];
             self.position_within_block += take as u8;
             if self.position_within_block == BLOCK_LEN as u8 {
